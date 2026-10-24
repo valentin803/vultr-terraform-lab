@@ -1,7 +1,9 @@
 # Provideri si fisiere locale Terraform
+# [Q1] .terraform/ vs .terraform.lock.hcl
 .terraform/
 
 # State Terraform
+# [Q2] state-ul local
 *.tfstate
 *.tfstate.*
 
@@ -10,6 +12,7 @@
 *.tfvars.json
 
 # Planuri salvate
+# [Q26] .tfplan, .tfvars si state comis din greseala
 *.tfplan
 tfplan
 

@@ -7,6 +7,7 @@ terraform {
   }
 }
 
+# [Q27] rate_limit si retry_limit
 provider "vultr" {
   api_key     = var.vultr_api_key
   rate_limit  = 100

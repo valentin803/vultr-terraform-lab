@@ -1,3 +1,4 @@
+# [Q24] for peste lista vs map (suspect AI)
 output "master_ips" {
   description = "Numele si IP-urile VM-urilor master"
   value = {
