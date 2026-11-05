@@ -1,0 +1,334 @@
+- name: Prepare Kubernetes nodes
+  hosts: kubernetes
+  become: true
+
+  tasks:
+    - name: Refresh apt package index
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Install prerequisite packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gpg
+        state: present
+
+    - name: Disable active swap
+      ansible.builtin.command: swapoff -a
+      when: ansible_facts['swaptotal_mb'] > 0
+
+    - name: Disable swap entries in fstab
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([ \t]*[^#\s]+\s+\S+\s+swap\s+.*)$'
+        replace: '# \1'
+        backup: true
+
+    - name: Configure kernel modules to load at boot
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/kubernetes.conf
+        content: |
+          overlay
+          br_netfilter
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Load kernel modules now
+      ansible.builtin.command:
+        cmd: "modprobe {{ item }}"
+        creates: "/sys/module/{{ item }}"
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Configure Kubernetes network settings
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-kubernetes.conf
+        content: |
+          net.ipv4.ip_forward = 1
+          net.bridge.bridge-nf-call-iptables = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+        owner: root
+        group: root
+        mode: '0644'
+      register: kubernetes_sysctl
+
+    - name: Apply Kubernetes network settings
+      ansible.builtin.command:
+        cmd: sysctl -p /etc/sysctl.d/99-kubernetes.conf
+      when: kubernetes_sysctl.changed
+
+    - name: Install containerd
+      ansible.builtin.apt:
+        name: containerd
+        state: present
+
+    - name: Create containerd configuration directory
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Read default containerd configuration
+      ansible.builtin.command:
+        cmd: containerd config default
+      register: containerd_defaults
+      changed_when: false
+
+    - name: Write containerd configuration
+      ansible.builtin.copy:
+        dest: /etc/containerd/config.toml
+        content: "{{ containerd_defaults.stdout | replace('SystemdCgroup = false', 'SystemdCgroup = true') }}"
+        owner: root
+        group: root
+        mode: '0644'
+      register: containerd_config
+
+    - name: Restart containerd if configuration changed
+      ansible.builtin.systemd_service:
+        name: containerd
+        state: restarted
+      when: containerd_config.changed
+
+    - name: Ensure containerd is running and enabled
+      ansible.builtin.systemd_service:
+        name: containerd
+        state: started
+        enabled: true
+
+    - name: Create APT keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Download Kubernetes repository signing key
+      ansible.builtin.get_url:
+        url: "https://pkgs.k8s.io/core:/stable:/{{ kubernetes_version }}/deb/Release.key"
+        dest: /etc/apt/keyrings/kubernetes.asc
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Configure Kubernetes APT repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/kubernetes.list
+        content: |
+          deb [signed-by=/etc/apt/keyrings/kubernetes.asc] https://pkgs.k8s.io/core:/stable:/{{ kubernetes_version }}/deb/ /
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install Kubernetes comonents
+      ansible.builtin.apt:
+         name:
+            - kubelet
+            - kubeadm
+            - kubectl
+         state: present
+         update_cache: true
+
+    - name: Hold Kubernetes package versions
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    - name: Enable kubelet at boot
+      ansible.builtin.systemd_service:
+        name: kubelet
+        enabled: true
+
+- name: Initialize first Kubernetes master
+  hosts: master-node-1
+  become: true
+
+  tasks:
+    - name: Read installed kubeadm version
+      ansible.builtin.command:
+        cmd: kubeadm version -o short
+      register: kubeadm_version
+      changed_when: false
+
+    - name: Initialize Kubernetes cluster
+      ansible.builtin.command:
+        cmd: >-
+          kubeadm init
+          --kubernetes-version={{ kubeadm_version.stdout }}
+          --control-plane-endpoint={{ control_plane_endpoint }}
+          --pod-network-cidr={{ pod_network_cidr }}
+          --service-cidr={{ service_network_cidr }}
+          --cri-socket=unix:///run/containerd/containerd.sock
+        creates: /etc/kubernetes/admin.conf
+    
+    - name: Gemerate Kubernetes join command
+      ansible.builtin.command:
+          cmd: kubeadm token create  --print-join-command --ttl 2h
+      register: kubernetes_join
+      no_log: true
+
+    - name: Upload certificates for additional masters
+      ansible.builtin.command:
+        cmd: kubeadm init phase upload-certs --upload-certs
+      register: kubernetes_certificates
+      no_log: true
+
+    - name: Store certificate key for additional masters
+      ansible.builtin.set_fact:
+        kubernetes_certificate_key: "{{ kubernetes_certificates.stdout_lines | last | trim }}"
+      no_log: true
+
+- name: Join additional Kubernetes masters
+  hosts: masters:!master-node-1
+  become: true
+  serial: 1
+
+  tasks:
+    - name: Join master to Kubernetes cluster
+      ansible.builtin.command:
+        cmd: >-
+          {{ hostvars['master-node-1']['kubernetes_join']['stdout'] }}
+          --control-plane
+          --certificate-key={{ hostvars['master-node-1']['kubernetes_certificate_key'] }}
+          --cri-socket=unix:///run/containerd/containerd.sock
+        creates: /etc/kubernetes/admin.conf
+      no_log: true
+
+- name: Join Kubernetes workers
+  hosts: workers
+  become: true
+
+  tasks:
+    - name: Joint worker to Kubernetes cluster
+      ansible.builtin.command:
+        cmd: >-
+          {{ hostvars['master-node-1']['kubernetes_join']['stdout'] }}
+          --cri-socket=unix:///run/containerd/containerd.sock
+        creates: /etc/kubernetes/kubelet.conf
+      no_log: true
+
+- name: Export Kubernetes configuration
+  hosts: master-node-1
+  become: true
+
+  tasks:
+    - name: Create local kubeconfig directory
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/artifacts"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      become: false
+
+    - name: Download administrator kubeconfig
+      ansible.builtin.fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ playbook_dir }}/artifacts/kubeconfig"
+        flat: true
+
+- name: Install Calico networking
+  hosts: master-node-1
+  become: true
+
+  tasks:
+    - name: Download Tigera Operator manifest
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/tigera-operator.yaml"
+        dest: /root/tigera-operator.yaml
+        owner: root
+        group: root
+        mode: '0644'
+
+    
+    - name: Download Calico resource definitions
+      ansible.builtin.get_url:
+        url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/v3_projectcalico_org-v1beta1.yaml"
+        dest: /root/calico-crds.yaml
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Apply Calico resource definitions
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig=/etc/kubernetes/admin.conf
+          apply --server-side
+          -f /root/calico-crds.yaml
+
+    - name: Apply Tigera Operator manifest
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig=/etc/kubernetes/admin.conf
+          apply --server-side
+          -f /root/tigera-operator.yaml
+
+    - name: Write Calico installation configuration
+      ansible.builtin.copy:
+        dest: /root/calico-installation.yaml
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          apiVersion: operator.tigera.io/v1
+          kind: Installation
+          metadata:
+            name: default
+          spec:
+            calicoNetwork:
+              bgp: Disabled
+              ipPools:
+                - name: default-ipv4-ippool
+                  blockSize: 26
+                  cidr: "{{ pod_network_cidr }}"
+                  encapsulation: VXLAN
+                  natOutgoing: Enabled
+                  nodeSelector: all()
+
+    - name: Wait for Calico Installation resource definition
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig=/etc/kubernetes/admin.conf
+          wait --for=condition=Established
+          crd/installations.operator.tigera.io
+          --timeout=120s
+      changed_when: false
+
+    - name: Apply Calico installation configuration
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig=/etc/kubernetes/admin.conf
+          apply --server-side
+          -f /root/calico-installation.yaml
+
+    - name: Wait for Calico to become available
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig=/etc/kubernetes/admin.conf
+          wait --for=condition=Available
+          tigerastatus/calico
+          --timeout=60s
+      register: calico_status
+      until: calico_status.rc == 0
+      retries: 10
+      delay: 10
+      changed_when: false
+
+    - name: Wait for Kubernetes nodes to become Ready
+      ansible.builtin.command:
+        cmd: >-
+          kubectl --kubeconfig=/etc/kubernetes/admin.conf
+          wait --for=condition=Ready
+          node/{{ item }}
+          --timeout=300s
+      loop: "{{ groups['kubernetes'] }}"
+      changed_when: false

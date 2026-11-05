@@ -16,3 +16,4 @@ tfplan
 # Loguri de eroare
 crash.log
 crash.*.log
+ansible/artifacts/
