@@ -1,7 +1,9 @@
+# [Q8] play, task, modul si cum rulezi
 - name: Prepare Kubernetes nodes
   hosts: kubernetes
   become: true
 
+  # [Q32] un singur fisier cu 6 play-uri
   tasks:
     - name: Refresh apt package index
       ansible.builtin.apt:
@@ -15,17 +17,22 @@
           - gpg
         state: present
 
+    # [Q15] de ce dezactivezi swap
     - name: Disable active swap
+      # [Q9] idempotenta la command
       ansible.builtin.command: swapoff -a
+      # [Q10] facts si when
       when: ansible_facts['swaptotal_mb'] > 0
 
     - name: Disable swap entries in fstab
       ansible.builtin.replace:
         path: /etc/fstab
+        # [Q33] explica regexul (suspect AI)
         regexp: '^([ \t]*[^#\s]+\s+\S+\s+swap\s+.*)$'
         replace: '# \1'
         backup: true
 
+    # [Q16] module de kernel si sysctl
     - name: Configure kernel modules to load at boot
       ansible.builtin.copy:
         dest: /etc/modules-load.d/kubernetes.conf
@@ -54,6 +61,7 @@
         owner: root
         group: root
         mode: '0644'
+      # [Q11] register + when changed vs handlers
       register: kubernetes_sysctl
 
     - name: Apply Kubernetes network settings
@@ -61,6 +69,7 @@
         cmd: sysctl -p /etc/sysctl.d/99-kubernetes.conf
       when: kubernetes_sysctl.changed
 
+    # [Q17] containerd si CRI
     - name: Install containerd
       ansible.builtin.apt:
         name: containerd
@@ -83,6 +92,7 @@
     - name: Write containerd configuration
       ansible.builtin.copy:
         dest: /etc/containerd/config.toml
+        # [Q34] filtrul jinja din config-ul containerd (suspect AI)
         content: "{{ containerd_defaults.stdout | replace('SystemdCgroup = false', 'SystemdCgroup = true') }}"
         owner: root
         group: root
@@ -126,6 +136,7 @@
         group: root
         mode: '0644'
 
+    # [Q18] kubelet, kubeadm, kubectl
     - name: Install Kubernetes comonents
       ansible.builtin.apt:
          name:
@@ -135,6 +146,7 @@
          state: present
          update_cache: true
 
+    # [Q19] versiuni si hold
     - name: Hold Kubernetes package versions
       ansible.builtin.dpkg_selections:
         name: "{{ item }}"
@@ -150,6 +162,7 @@
         enabled: true
 
 - name: Initialize first Kubernetes master
+  # [Q12] master-node-1 hardcodat
   hosts: master-node-1
   become: true
 
@@ -160,6 +173,7 @@
       register: kubeadm_version
       changed_when: false
 
+    # [Q20] ce face kubeadm init
     - name: Initialize Kubernetes cluster
       ansible.builtin.command:
         cmd: >-
@@ -169,14 +183,18 @@
           --pod-network-cidr={{ pod_network_cidr }}
           --service-cidr={{ service_network_cidr }}
           --cri-socket=unix:///run/containerd/containerd.sock
+        # [Q21] kubeadm init picat la jumatate
         creates: /etc/kubernetes/admin.conf
     
+    # [Q22] token de join
     - name: Gemerate Kubernetes join command
       ansible.builtin.command:
           cmd: kubeadm token create  --print-join-command --ttl 2h
       register: kubernetes_join
+      # [Q14] no_log
       no_log: true
 
+    # [Q23] upload-certs si certificate-key
     - name: Upload certificates for additional masters
       ansible.builtin.command:
         cmd: kubeadm init phase upload-certs --upload-certs
@@ -185,15 +203,18 @@
 
     - name: Store certificate key for additional masters
       ansible.builtin.set_fact:
+        # [Q35] stdout_lines | last | trim (suspect AI)
         kubernetes_certificate_key: "{{ kubernetes_certificates.stdout_lines | last | trim }}"
       no_log: true
 
 - name: Join additional Kubernetes masters
   hosts: masters:!master-node-1
   become: true
+  # [Q24] serial: 1 si pattern-ul de hosts
   serial: 1
 
   tasks:
+    # [Q13] hostvars si set_fact intre play-uri
     - name: Join master to Kubernetes cluster
       ansible.builtin.command:
         cmd: >-
@@ -209,6 +230,7 @@
   become: true
 
   tasks:
+    # [Q36] ce ai scris singur si ce ai generat
     - name: Joint worker to Kubernetes cluster
       ansible.builtin.command:
         cmd: >-
@@ -230,12 +252,14 @@
       delegate_to: localhost
       become: false
 
+    # [Q25] kubeconfig
     - name: Download administrator kubeconfig
       ansible.builtin.fetch:
         src: /etc/kubernetes/admin.conf
         dest: "{{ playbook_dir }}/artifacts/kubeconfig"
         flat: true
 
+# [Q27] de ce ai nevoie de CNI
 - name: Install Calico networking
   hosts: master-node-1
   become: true
@@ -258,6 +282,7 @@
         group: root
         mode: '0644'
 
+    # [Q28] kubectl apply prin command
     - name: Apply Calico resource definitions
       ansible.builtin.command:
         cmd: >-
@@ -272,6 +297,7 @@
           apply --server-side
           -f /root/tigera-operator.yaml
 
+    # [Q30] manifestul Installation
     - name: Write Calico installation configuration
       ansible.builtin.copy:
         dest: /root/calico-installation.yaml
@@ -310,6 +336,7 @@
           apply --server-side
           -f /root/calico-installation.yaml
 
+    # [Q29] until, retries, delay
     - name: Wait for Calico to become available
       ansible.builtin.command:
         cmd: >-
@@ -323,6 +350,7 @@
       delay: 10
       changed_when: false
 
+    # [Q26] clusterul chiar merge?
     - name: Wait for Kubernetes nodes to become Ready
       ansible.builtin.command:
         cmd: >-

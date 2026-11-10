@@ -50,5 +50,6 @@ jobs:
       - name: Show inventory
         run: ansible-inventory -i inventory.ini --graph
 
+      # [Q31] ce prinde si ce nu prinde CI-ul
       - name: Check playbook syntax
         run: ansible-playbook -i inventory.ini site.yml --syntax-check
