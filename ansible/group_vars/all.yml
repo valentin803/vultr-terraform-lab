@@ -1,7 +1,10 @@
+# [Q5] cum ajung variabilele in playbook
 kubernetes_version: "v1.35"
 
+# [Q7] CIDR-uri pentru pod-uri si servicii
 pod_network_cidr: "10.244.0.0/16"
 service_network_cidr: "10.96.0.0/12"
 
+# [Q6] control_plane_endpoint
 control_plane_endpoint: "k8s-api.example.com:6443"
 calico_version: "v3.33.0"
